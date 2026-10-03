@@ -1,0 +1,1747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CAMERA SYSTEM</title>
+<style>
+  /* =====================================================================
+     PHOSPHOR PALETTE  -  dirty old green CRT tube
+     ===================================================================== */
+  :root {
+    --bg:        #000600;
+    --screen:    #01170a;
+    --glow:      51, 255, 102;   /* main phosphor (rgb parts) */
+    --green:     #6dff8b;
+    --green-hot: #d8ffe2;
+    --green-bright: #a6ffb4;
+    --green-dim: #3ec768;
+    --green-mid: #5ee886;
+    --amber:     #ffcf4d;
+    --red:       #ff8a6a;
+    --line:      rgba(109, 255, 139, 0.30);
+    --line-hot:  rgba(109, 255, 139, 0.60);
+    --pad-x:     26px;
+    --mono: "Consolas", "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
+
+    /* speckled phosphor screen, zoomed in so the grain is coarse.
+       fill-opacity keeps the noise translucent, otherwise it whitens the
+       whole tube instead of texturing it. */
+    --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.72' numOctaves='4' seed='11' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' fill-opacity='0.45'/%3E%3C/svg%3E");
+    /* huge dark-green blotches: mould / dirt on the tube */
+    --grime: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='700' height='700'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.009 0.011' numOctaves='5' seed='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' fill-opacity='0.5'/%3E%3C/svg%3E");
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--green);
+    font-family: var(--mono);
+  }
+
+  /* the tube itself: rounded, dim green, with dirt baked in.
+     NOTE: no `filter` and no blend modes anywhere in this file - those force
+     the browser to re-composite the whole screen every frame, which is what
+     made the page crawl. Everything here is plain alpha over a static
+     background, so the compositor can cache it. */
+  body {
+    height: 100%;
+    padding: 18px var(--pad-x) 22px;
+    font-size: 14px;
+    line-height: 1.62;
+    letter-spacing: 0.5px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+    background-color: var(--screen);
+    background-image:
+      radial-gradient(ellipse 64% 52% at 50% 34%, rgba(26, 132, 60, 0.30) 0%, rgba(4, 40, 17, 0.14) 46%, rgba(0, 0, 0, 0) 74%),
+      linear-gradient(to bottom, rgba(0, 0, 0, 0.40) 0%, rgba(0, 0, 0, 0) 13%, rgba(0, 0, 0, 0) 88%, rgba(0, 0, 0, 0.44) 100%),
+      linear-gradient(to right,  rgba(0, 0, 0, 0.40) 0%, rgba(0, 0, 0, 0) 11%, rgba(0, 0, 0, 0) 89%, rgba(0, 0, 0, 0.40) 100%);
+    background-attachment: fixed, fixed, fixed;
+  }
+
+  /* the parts that flex, so the two panels share the viewport and scroll
+     internally instead of the whole page scrolling */
+  header, footer { flex: 0 0 auto; }
+  main { flex: 1 1 auto; min-height: 0; }
+  section { display: flex; flex-direction: column; min-height: 0; }
+  #log-body { flex: 1 1 auto; min-height: 0; }
+
+  /* cheap flicker: one small overlay fading, instead of a full-page filter */
+  .fx-flick {
+    position: fixed;
+    inset: 0;
+    z-index: 9;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.22);
+    opacity: 0;
+    animation: flick 7s steps(1) infinite;
+  }
+  @keyframes flick {
+    0%, 93%  { opacity: 0; }
+    93.4%    { opacity: 0.55; }
+    93.9%    { opacity: 0; }
+    96.6%    { opacity: 0.35; }
+    97%      { opacity: 0; }
+    100%     { opacity: 0; }
+  }
+
+  /* everything structural sits above the overlays */
+  header, main, footer, #boot { position: relative; z-index: 4; }
+  header, main, footer, #boot {
+    /* very slight barrel bulge: the tube is round, the signal is not */
+    transform: scale(1.005);
+    transform-origin: 50% 46%;
+    /* a soft halo so the glyphs bleed a little, the way phosphor does.
+       Painted once into the layer, never re-rendered. */
+    text-shadow:
+      0 0 2px rgba(var(--glow), 0.30),
+      0 0 10px rgba(var(--glow), 0.16);
+  }
+
+  /* ---------- overlays: dirt, grain, aperture grille, vignette ---------- */
+  .fx { position: fixed; inset: -70px; pointer-events: none; }
+
+  /* static mould blotches. background-blend-mode composites the two textures
+     at paint time (one cached layer) instead of a live mix-blend-mode surface
+     over the whole page, which is what used to cost us the frame rate. */
+  .fx-dirt {
+    z-index: 2;
+    background-image: var(--grime), var(--grain);
+    background-size: 820px 820px, 150px 150px;
+    background-blend-mode: soft-light, overlay;
+    opacity: 0.52;
+    -webkit-mask-image: radial-gradient(ellipse 66% 58% at 50% 46%, rgba(0,0,0,0.25) 8%, #000 76%);
+    mask-image: radial-gradient(ellipse 66% 58% at 50% 46%, rgba(0,0,0,0.25) 8%, #000 76%);
+  }
+
+  /* fine dust speckle, drifting by background-position: one small cached layer
+     repainted, nothing else on the page is touched */
+  .fx-grain {
+    z-index: 6;
+    background-image: var(--grain);
+    background-size: 170px 170px;
+    opacity: 0.28;
+    animation: dustDrift 0.9s steps(1) infinite;
+  }
+  @keyframes dustDrift {
+    0%   { background-position: 0 0; }
+    25%  { background-position: -11px 7px; }
+    50%  { background-position: 6px -13px; }
+    75%  { background-position: 13px 9px; }
+    100% { background-position: 0 0; }
+  }
+
+  /* the aged monochrome display runs on green and green only: the alerts are
+     the one exception, exactly like a real mono monitor's warning lamp */
+  .state-muted  { text-shadow: 0 0 11px rgba(255, 170, 30, 0.55); }
+  .state-degraded { text-shadow: 0 0 10px rgba(255, 150, 40, 0.55); }
+
+  .fx-scan {
+    z-index: 5;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0)    0px,
+      rgba(0, 0, 0, 0)    1px,
+      rgba(0, 0, 0, 0.30) 2px,
+      rgba(0, 0, 0, 0.30) 3px
+    );
+  }
+  /* vertical phosphor triads */
+  .fx-grille {
+    z-index: 5;
+    background: repeating-linear-gradient(
+      to right,
+      rgba(0, 0, 0, 0) 0px,
+      rgba(0, 0, 0, 0) 1px,
+      rgba(0, 0, 0, 0.20) 2px,
+      rgba(0, 0, 0, 0.20) 3px
+    );
+  }
+
+  .fx-vignette {
+    z-index: 8;
+    background:
+      /* faint green phosphor wash, so the tube looks lit rather than painted */
+      radial-gradient(ellipse 58% 48% at 50% 38%, rgba(30, 140, 66, 0.16) 0%, rgba(0, 0, 0, 0) 72%),
+      /* dark shoulder coming in from the left, brightest just right of centre */
+      linear-gradient(to right,
+        rgba(0, 0, 0, 0.44) 0%,
+        rgba(0, 0, 0, 0.10) 12%,
+        rgba(0, 0, 0, 0) 32%,
+        rgba(0, 0, 0, 0) 62%,
+        rgba(0, 0, 0, 0.18) 86%,
+        rgba(0, 0, 0, 0.48) 100%),
+      radial-gradient(
+        ellipse 80% 74% at 50% 48%,
+        rgba(0, 0, 0, 0) 38%,
+        rgba(0, 0, 0, 0.28) 66%,
+        rgba(0, 7, 3, 0.66) 88%,
+        rgba(0, 0, 0, 0.92) 100%
+      );
+  }
+
+  /* the refresh line, sweeping down once every 7 s. Transform only. */
+  .fx-sweep {
+    z-index: 7;
+    height: 22vh;
+    background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(var(--glow), 0.045) 42%,
+      rgba(200, 255, 218, 0.085) 52%,
+      rgba(var(--glow), 0.045) 62%,
+      rgba(255, 255, 255, 0) 100%);
+    animation: sweep 7s linear infinite;
+  }
+  @keyframes sweep {
+    0%   { transform: translateY(-24vh); }
+    100% { transform: translateY(112vh); }
+  }
+
+  /* vertical hold drifting: one soft bright band slowly rolling upward */
+  .fx-roll {
+    z-index: 6;
+    background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(var(--glow), 0.045) 38%,
+      rgba(200, 255, 215, 0.070) 50%,
+      rgba(var(--glow), 0.045) 62%,
+      rgba(255, 255, 255, 0) 100%);
+    background-size: 100% 46vh;
+    background-repeat: no-repeat;
+    animation: rollUp 13s linear infinite;
+  }
+  @keyframes rollUp {
+    0%   { background-position: 0 -46vh; }
+    100% { background-position: 0 146vh; }
+  }
+
+  /* occasional tear sweeping down. Transform only - no blur, no repaint of
+     the layers underneath. */
+  .fx-tear {
+    position: fixed;
+    top: 0;
+    left: -4%;
+    width: 108%;
+    height: 30vh;
+    z-index: 7;
+    pointer-events: none;
+    background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(var(--glow), 0.07) 40%,
+      rgba(230, 255, 238, 0.13) 52%,
+      rgba(var(--glow), 0.07) 64%,
+      rgba(255, 255, 255, 0) 100%);
+    opacity: 0;
+    animation: tearSweep 9s linear infinite;
+  }
+  @keyframes tearSweep {
+    0%   { transform: translateY(-34vh); opacity: 0; }
+    7%   { opacity: 0.8; }
+    21%  { opacity: 0.5; }
+    30%  { transform: translateY(104vh); opacity: 0; }
+    100% { transform: translateY(104vh); opacity: 0; }
+  }
+
+  /* ---------- Boot line ---------- */
+  /* reserves its height and is removed once the sequence ends, so nothing
+     ever overlaps the title */
+  #boot {
+    color: var(--green-dim);
+    font-size: 12px;
+    min-height: 7.2em;
+    white-space: pre-wrap;
+    flex: 0 0 auto;
+    transition: opacity 0.45s linear;
+  }
+  #boot.done { opacity: 0; }
+  #boot .on { color: var(--green); }
+
+  /* ---------- Header ---------- */
+  header {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 8px;
+  }
+  .titlebar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 6px 14px;
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(19px, 3.6vw, 34px);
+    font-weight: 700;
+    letter-spacing: 3.5px;
+    color: #74e88e;
+    text-transform: uppercase;
+    /* the title is the brightest thing on the tube, so it blooms hardest */
+    text-shadow:
+      0 0 3px rgba(200, 255, 215, 0.50),
+      0 0 12px rgba(var(--glow), 0.45),
+      0 0 30px rgba(var(--glow), 0.22);
+  }
+  h1 .caret {
+    display: inline-block;
+    width: 0.55em;
+    background: #8ef0a4;
+    animation: blink 1.05s steps(1) infinite;
+  }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 18px;
+    font-size: 12px;
+    color: var(--green-mid);
+    text-transform: uppercase;
+  }
+  .meta b { color: var(--green-bright); font-weight: 700; }
+
+  /* ---------- Layout ---------- */
+  /* One tab at a time. `main` is a column flex box: the tab bar keeps its
+     height and the active panel takes the rest. Without a definite height
+     here the panel's own `height: 100%` resolves against its content and the
+     log overflows past the footer. */
+  main {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  #logs, #channels, #admin { display: none; }
+  #logs.is-active,
+  #channels.is-active,
+  #admin.is-active {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .tabbar {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0;
+  }
+  .tab {
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #4fbf74;
+    background: rgba(2, 24, 11, 0.55);
+    border: 1px solid var(--line);
+    border-bottom: none;
+    padding: 6px 22px;
+    cursor: pointer;
+  }
+  .tab + .tab { margin-left: -1px; }
+  .tab:hover { color: #8ef0a4; background: rgba(28, 88, 44, 0.32); }
+  .tab.is-active {
+    color: #06170b;
+    background: rgba(109, 255, 139, 0.66);
+    border-color: rgba(109, 255, 139, 0.85);
+    box-shadow: 0 -2px 12px rgba(var(--glow), 0.3);
+  }
+  .tab:focus-visible { outline: 1px solid rgba(109, 255, 139, 0.9); outline-offset: -3px; }
+
+  /* the panels sit directly under the tab bar, sharing its top border */
+  main > section { border-top-color: var(--line-hot); }
+
+  section {
+    border: 1px solid var(--line);
+    background: rgba(2, 24, 11, 0.50);
+    box-shadow:
+      inset 0 0 30px rgba(var(--glow), 0.07),
+      inset 0 0 3px rgba(0, 0, 0, 0.6);
+    /* tells the browser nothing outside changes when a row is appended */
+    contain: content;
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(28, 88, 44, 0.22);
+    font-size: 12px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #8ef0a4;
+    flex: 0 0 auto;
+  }
+  .panel-head .count { color: #6ede8a; letter-spacing: 0; text-transform: none; }
+
+  /* ---------- Panels ---------- */
+  /* No opacity animation on the panels: a hidden-by-default panel stays hidden
+     forever if the animation never receives a frame (headless renderers,
+     throttled tabs), which is what broke an earlier build. Tabs control
+     visibility, and only the active one is displayed. */
+  #logs, #channels, #admin { opacity: 1; }
+
+  /* ---------- Admin tab: nothing but the login gate ---------- */
+  #admin-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 26px 16px;
+    scrollbar-width: none;
+  }
+  .admin-gate {
+    max-width: 520px;
+    margin: 0 auto;
+    border: 1px solid var(--line);
+    background: rgba(1, 18, 8, 0.55);
+    padding: 18px 20px 20px;
+    text-align: center;
+  }
+  .gate-kicker {
+    color: #2f8f4c;
+    font-size: 10.5px;
+    letter-spacing: 2.6px;
+    text-transform: uppercase;
+  }
+  .gate-title {
+    margin: 7px 0 5px;
+    color: #b6ffc4;
+    font-size: 15px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .gate-sub {
+    color: #4fbf74;
+    font-size: 12px;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+  }
+  .gate-btn {
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #06170b;
+    background: rgba(109, 255, 139, 0.62);
+    border: 1px solid rgba(109, 255, 139, 0.85);
+    padding: 6px 24px;
+    cursor: pointer;
+  }
+  .gate-btn:hover { background: #b6ffc4; box-shadow: 0 0 14px rgba(var(--glow), 0.45); }
+  .gate-note {
+    margin-top: 14px;
+    color: #2f8f4c;
+    font-size: 10.5px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+
+  /* ---------- Log ---------- */
+  #log-body {
+    padding: 10px 10px 4px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    font-size: 13.5px;
+    /* keep a scrolled-to-bottom row from being sliced in half at the edge */
+    scroll-padding-bottom: 14px;
+    overscroll-behavior: contain;
+    /* convergence error: green phosphor with a faint cyan fringe, the way an
+       old tube never quite lines its guns up */
+    text-shadow:
+      -0.6px 0 0 rgba(90, 255, 210, 0.30),
+      0.6px 0 0 rgba(var(--glow), 0.22);
+  }
+  /* both panels scroll, but the UA scrollbar renders grey and breaks the
+     monochrome tube. A thin green phosphor bar replaces it; Firefox gets
+     scrollbar-width: none so it simply has no visible bar. */
+  #log-body, #channel-list { scrollbar-width: none; }
+  #log-body::-webkit-scrollbar,
+  #channel-list::-webkit-scrollbar { width: 9px; }
+  #log-body::-webkit-scrollbar-track,
+  #channel-list::-webkit-scrollbar-track {
+    background: rgba(1, 20, 9, 0.55);
+    border-left: 1px solid rgba(109, 255, 139, 0.16);
+  }
+  #log-body::-webkit-scrollbar-thumb,
+  #channel-list::-webkit-scrollbar-thumb {
+    background: rgba(109, 255, 139, 0.34);
+    border: 1px solid rgba(109, 255, 139, 0.55);
+    box-shadow: 0 0 8px rgba(var(--glow), 0.35);
+  }
+  #log-body::-webkit-scrollbar-thumb:hover,
+  #channel-list::-webkit-scrollbar-thumb:hover { background: rgba(109, 255, 139, 0.55); }
+  #log-body::-webkit-scrollbar-corner,
+  #channel-list::-webkit-scrollbar-corner { background: transparent; }
+
+  .row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin: 0 0 2px;
+    white-space: nowrap;
+    animation: lineIn 0.2s ease-out;
+  }
+  @keyframes lineIn { from { opacity: 0; } to { opacity: 1; } }
+
+  .ts   { color: #55e07c; flex: 0 0 auto; }
+  .tag  { flex: 0 0 6.2em; color: #9dffb2; font-weight: 700; }
+  .msg  { color: #93e9a8; flex: 1 1 auto; min-width: 0; white-space: normal; }
+
+  /* tags stay inside the green phosphor family; only CRIT / ADMIN / errors
+     are allowed to break hue, exactly like a real mono monitor's alerts */
+  .tag.sys   { color: #c4f2cf; }
+  .tag.cam   { color: #9dffb2; }
+  .tag.mic   { color: #86dfa0; }
+  .tag.store { color: #bfe894; }
+  .tag.net   { color: #7ce09a; }
+  .tag.crit  { color: #ffc247; }
+  .tag.admin { color: #f0a0cc; }
+
+  .row.crit .msg { color: #ffc247; }
+  .row.crit { text-shadow: 0 0 10px rgba(255, 180, 30, 0.6); }
+  .row.err .msg { color: #ff7a5e; }
+  .row.err {
+    text-shadow: 0 0 10px rgba(255, 80, 60, 0.65);
+    animation: errFlicker 2.6s steps(1) infinite;
+  }
+  @keyframes errFlicker {
+    0%, 100% { opacity: 1; }
+    44%      { opacity: 1; }
+    45%      { opacity: 0.55; }
+    46%      { opacity: 1; }
+    73%      { opacity: 0.78; }
+    74%      { opacity: 1; }
+  }
+  .row.admin .msg { color: #f0a0cc; animation: adminPulse 3.4s ease-in-out infinite; }
+  @keyframes adminPulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.74; }
+  }
+
+  /* subject / instance records run pink like ADMIN lines */
+  .tag.subject { color: #f0a0cc; }
+  .row .msg.kind-subject { color: #ffc9e6; }
+
+  .row.last { margin-top: 6px; }
+
+  .cursor {
+    display: inline-block;
+    width: 0.6em;
+    height: 1em;
+    background: var(--green-hot);
+    box-shadow: 0 0 8px rgba(var(--glow), 0.9), 0 0 20px rgba(var(--glow), 0.5);
+    vertical-align: -0.15em;
+    animation: blink 1s steps(1) infinite;
+  }
+
+  /* ---------- Channels ---------- */
+  /* The list keeps its original place on the left; the locked zone sits to the
+     right of it, roughly where the original sidebar column was. */
+  #channel-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 26%);
+    align-items: stretch;
+    overflow: hidden;          /* the two columns scroll independently */
+    scrollbar-width: none;
+  }
+  #channel-list {
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    padding: 9px 10px 14px;
+    font-size: 13px;
+    scrollbar-width: none;
+  }
+  #channel-list::-webkit-scrollbar,
+  #locked-zone::-webkit-scrollbar { width: 9px; }
+  #channel-list::-webkit-scrollbar-track,
+  #locked-zone::-webkit-scrollbar-track {
+    background: rgba(1, 20, 9, 0.55);
+    border-left: 1px solid rgba(109, 255, 139, 0.16);
+  }
+  #channel-list::-webkit-scrollbar-thumb,
+  #locked-zone::-webkit-scrollbar-thumb {
+    background: rgba(109, 255, 139, 0.34);
+    border: 1px solid rgba(109, 255, 139, 0.55);
+  }
+  #locked-zone {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid var(--line);
+    background: rgba(1, 15, 7, 0.55);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+  }
+  /* NOTE: the narrow-screen override has to come after the base grid rule
+     above, otherwise the later `grid-template-columns` wins and the zone never
+     stacks. */
+  @media (max-width: 880px) {
+    #channel-body {
+      grid-template-columns: minmax(0, 1fr);
+      /* the locked zone gets a fixed share so its button is always on screen;
+         the list scrolls for whatever is left */
+      grid-template-rows: minmax(0, 1fr) 300px;
+    }
+    #locked-zone {
+      border-left: none;
+      border-top: 1px solid var(--line);
+      max-height: none;
+    }
+  }
+  .locked-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(28, 88, 44, 0.16);
+    color: #4fbf74;
+    font-size: 11px;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    flex: 0 0 auto;
+  }
+  .locked-tag { color: #ffc247; letter-spacing: 1px; }
+  .locked-body { padding: 11px 12px 13px; text-align: center; }
+  .locked-rows {
+    margin-top: 11px;
+    padding-top: 8px;
+    border-top: 1px dashed rgba(109, 255, 139, 0.18);
+    font-size: 11px;
+    letter-spacing: 0.6px;
+    color: #2f8f4c;
+    text-align: left;
+  }
+  .locked-rows div {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 1px 0;
+  }
+  .locked-rows span:last-child { color: #3fa860; }
+
+  /* list entry: id + title on the first line; call-sign, account count and
+     status on the second. The right-hand columns are explicit grid tracks -
+     auto margins and justify-self end up in the same cell and overlap. */
+  .channel {
+    display: grid;
+    /* first track fits CH-CYF as well as CH-00 */
+    grid-template-columns: 5.2em minmax(0, 1fr) 9em 6.2em;
+    /* the panel is full width now; cap the row so the four columns do not
+       drift a screen apart */
+    max-width: 880px;
+    column-gap: 6px;
+    row-gap: 0;
+    padding: 3px 0 6px;
+    margin: 0;
+  }
+  .ch-id {
+    color: #55e07c;
+    grid-column: 1;
+    grid-row: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ch-name {
+    color: #93e9a8;
+    grid-column: 2 / -1;
+    grid-row: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ch-nick {
+    grid-column: 2;
+    grid-row: 2;
+    color: #7ce09a;
+    font-size: 12px;
+    line-height: 1.3;
+    text-shadow: 0 0 8px rgba(var(--glow), 0.45);
+  }
+  .ch-nick::before { content: "["; color: #4fbf74; }
+  .ch-nick::after  { content: "]"; color: #4fbf74; }
+  /* the account count on the administrative header row */
+  .ch-adm-total {
+    grid-column: 3 / -1;
+    grid-row: 1;
+    text-align: right;
+    color: #3fa860;
+    font-size: 11.5px;
+    white-space: nowrap;
+  }
+  .ch-state {
+    grid-column: 4;
+    grid-row: 2;
+    text-align: right;
+    font-size: 12px;
+    line-height: 1.3;
+    font-weight: 700;
+  }
+
+  /* ---- administrative accounts: one row each, two switches ---- */
+  .admin-head {
+    padding-bottom: 2px;
+    border-bottom: 1px dashed rgba(109, 255, 139, 0.22);
+    margin-bottom: 1px;
+  }
+  .ch-controls {
+    color: #2f8f4c;
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    padding: 2px 0 6px 3em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .admin-row {
+    grid-template-columns: 2.6em minmax(0, 1fr) 6.4em 7em;
+    padding: 2px 0 2px 1em;
+  }
+  .ch-acc-no   { grid-column: 1; grid-row: 1; color: #3fa860; font-size: 12px; }
+  .ch-acc-name { grid-column: 2; grid-row: 1; color: #93e9a8; white-space: nowrap; }
+  .ch-presence {
+    grid-column: 3;
+    grid-row: 1;
+    text-align: right;
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+  .ch-mute {
+    grid-column: 4;
+    grid-row: 1;
+    text-align: right;
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+  .is-online   { color: #8ef0a4; }
+  .is-offline  { color: #3fa860; }
+  .is-muted    { color: #ff6a5a; text-shadow: 0 0 9px rgba(255, 70, 50, 0.55); }
+  .is-unmuted  { color: #7ce09a; }
+  .state-muted  { color: #ffc247; }
+  .state-off    { color: #3fa860; }
+  .state-active { color: #8ef0a4; }
+  .state-online { color: #b6ffc4; text-shadow: 0 0 9px rgba(var(--glow), 0.55); }
+  .state-degraded { color: #ffa93a; }
+  .state-sealed { color: #3fa860; }
+
+  /* ---------- organisational banner ---------- */
+  .org {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 3px 10px;
+    margin-bottom: 3px;
+    font-size: 11px;
+    letter-spacing: 2.2px;
+    text-transform: uppercase;
+  }
+  .org-name  { color: var(--green-bright); }
+  .org-sep   { color: var(--green-dim); }
+  .org-sub   { color: var(--green-mid); }
+  .org-clear { color: var(--amber); margin-left: auto; letter-spacing: 1.5px; }
+
+  /* ---------- login trigger ---------- */
+  .org-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-left: auto;
+  }
+  .login-btn {
+    font: inherit;
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: #0a1a0d;
+    background: rgba(109, 255, 139, 0.62);
+    border: 1px solid rgba(109, 255, 139, 0.85);
+    padding: 2px 12px;
+    cursor: pointer;
+    text-shadow: none;
+  }
+  .login-btn:hover,
+  .login-btn:focus-visible {
+    background: #b6ffc4;
+    outline: none;
+    box-shadow: 0 0 12px rgba(var(--glow), 0.5);
+  }
+
+  /* ---------- login panel (decoration only: it authenticates nothing) ------- */
+  .login-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 4, 2, 0.66);
+  }
+  .login-overlay.open { display: flex; }
+
+  .login-panel {
+    width: min(430px, calc(100vw - 40px));
+    border: 1px solid var(--line-hot);
+    background: rgba(2, 26, 12, 0.97);
+    box-shadow: 0 0 40px rgba(var(--glow), 0.12), inset 0 0 30px rgba(var(--glow), 0.05);
+    font-size: 12.5px;
+    /* the panel is a surface, not text: reset the inherited phosphor halo */
+    text-shadow: none;
+    transform: none;
+    /* must out-rank the structural halo rule on header/main/footer */
+    z-index: 41;
+  }
+  .login-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(28, 88, 44, 0.28);
+    color: #b6ffc4;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-size: 11.5px;
+  }
+  .login-close {
+    font: inherit;
+    background: none;
+    border: 1px solid rgba(109, 255, 139, 0.4);
+    color: #8ef0a4;
+    cursor: pointer;
+    padding: 0 7px;
+    line-height: 1.4;
+  }
+  .login-close:hover { background: rgba(109, 255, 139, 0.18); }
+
+  .login-body { padding: 13px 14px 15px; }
+
+  .login-field {
+    display: block;
+    margin-bottom: 11px;
+  }
+  .login-field .lf-label {
+    display: block;
+    margin-bottom: 4px;
+    color: #4fbf74;
+    font-size: 10.5px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .login-field input {
+    display: block;
+    width: 100%;
+    font: inherit;
+    font-size: 13px;
+    letter-spacing: 0.6px;
+    color: #b6ffc4;
+    background: rgba(1, 18, 8, 0.92);
+    border: 1px solid rgba(109, 255, 139, 0.34);
+    padding: 5px 8px;
+    caret-color: #8ef0a4;
+  }
+  .login-field input:focus {
+    outline: none;
+    border-color: rgba(109, 255, 139, 0.85);
+    box-shadow: 0 0 10px rgba(var(--glow), 0.28), inset 0 0 8px rgba(var(--glow), 0.10);
+  }
+  .login-field input::placeholder { color: rgba(79, 191, 116, 0.75); }
+
+  .login-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 14px;
+  }
+  .login-submit {
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #0a1a0d;
+    background: rgba(109, 255, 139, 0.62);
+    border: 1px solid rgba(109, 255, 139, 0.85);
+    padding: 4px 20px;
+    cursor: pointer;
+  }
+  .login-submit:hover { background: #b6ffc4; }
+  .login-note {
+    color: #2f8f4c;
+    font-size: 10.5px;
+    letter-spacing: 0.8px;
+  }
+
+  .login-msg {
+    margin-top: 12px;
+    padding: 7px 9px;
+    border: 1px solid rgba(255, 106, 90, 0.55);
+    background: rgba(60, 12, 8, 0.5);
+    color: #ff6a5a;
+    font-size: 12px;
+    letter-spacing: 0.8px;
+    display: none;
+    white-space: pre-wrap;
+  }
+  .login-msg.show { display: block; }
+
+  /* designator under the title: this terminal serves timezone 9 */
+  .title-block { min-width: 0; }
+  .subtitle {
+    margin: 4px 0 0;
+    font-size: 12.5px;
+    letter-spacing: 5px;
+    text-transform: uppercase;
+    color: #6ee08c;
+    /* a wider halo than the body text, so the small caps read as their own
+       plate under the title instead of a squashed descender */
+    text-shadow:
+      0 0 3px rgba(180, 255, 200, 0.35),
+      0 0 14px rgba(var(--glow), 0.30);
+  }
+  .subtitle .sub-mark { color: #4fbf74; letter-spacing: 2px; }
+
+  /* ---------- Footer ---------- */
+  footer {
+    padding-top: 7px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
+    color: var(--green-mid);
+    text-transform: uppercase;
+  }
+  .foot-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 20px;
+  }
+  .foot-warn {
+    margin-top: 4px;
+    color: #4fbf74;
+    font-size: 10.5px;
+    letter-spacing: 1.5px;
+  }
+  footer .sound { cursor: pointer; color: var(--green-bright); margin-left: auto; }
+  footer .sound:hover { color: var(--green-hot); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .fx-grain, .fx-tear, .fx-dirt, .fx-roll, .fx-flick, .fx-sweep,
+    h1 .caret, .cursor, .row, .row.err, .row.admin { animation: none !important; }
+  }
+</style>
+</head>
+<body class="crt">
+
+<div id="boot"></div>
+
+<header>
+  <div class="org">
+    <span class="org-name">WORLD-SPACE MONITORING TERMINAL</span>
+    <span class="org-sep">//</span>
+    <span class="org-sub">TRANS-WORLD SURVEILLANCE DIVISION</span>
+    <div class="org-right">
+      <button type="button" class="login-btn" id="login-open">LOGIN</button>
+      <span class="org-clear">CLEARANCE 4 REQUIRED</span>
+    </div>
+  </div>
+  <div class="titlebar">
+    <div class="title-block">
+      <h1>Camera System<span class="caret"></span></h1>
+      <div class="subtitle"><span class="sub-mark">//</span> TIMEZONE 9</div>
+    </div>
+    <div class="meta">
+      <span>OP <b id="session-id">--------</b></span>
+      <span>OPERATOR <b>UNSET</b></span>
+      <span>WORLDS <b id="feed-count">0/0</b></span>
+      <span>DATE <b id="clock-date">----.--.--</b></span>
+      <span>TIME <b id="clock-time">--:--:--</b></span>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <div class="tabbar" role="tablist" aria-label="terminal sections">
+    <button type="button" class="tab is-active" id="tab-logs" role="tab"
+            aria-selected="true" aria-controls="logs">Logs</button>
+    <button type="button" class="tab" id="tab-channels" role="tab"
+            aria-selected="false" aria-controls="channels">Channels</button>
+    <button type="button" class="tab" id="tab-admin" role="tab"
+            aria-selected="false" aria-controls="admin">Admin</button>
+  </div>
+
+  <section id="logs" class="is-active" role="tabpanel" aria-labelledby="tab-logs">
+    <div class="panel-head">
+      <span>&gt; Logs</span>
+      <span class="count" id="log-count">records: 0</span>
+    </div>
+    <div id="log-body" title="click to dump the whole record"></div>
+  </section>
+
+  <!-- Channels tab: the channel list on the left, and a second, locked zone
+       on the right that opens nothing without the login query. -->
+  <section id="channels" role="tabpanel" aria-labelledby="tab-channels">
+    <div class="panel-head">
+      <span>&gt; Channels</span>
+      <span class="count" id="ch-count">0 lines</span>
+    </div>
+    <div id="channel-body">
+      <div id="channel-list"></div>
+
+      <div class="locked-zone" id="locked-zone">
+        <div class="locked-head">
+          <span>CH-CYF-GATE</span>
+          <span class="locked-tag">LOCKED</span>
+        </div>
+        <div class="locked-body">
+          <div class="gate-kicker">restricted feed</div>
+          <div class="gate-title">Login Required</div>
+          <div class="gate-sub">This channel opens only to a signed session.<br>No session is held on this terminal.</div>
+          <button type="button" class="gate-btn" id="locked-login">Login Query</button>
+          <div class="locked-rows">
+            <div><span>feed address</span><span>resolved</span></div>
+            <div><span>carrier</span><span>none</span></div>
+            <div><span>last frame</span><span>withheld</span></div>
+          </div>
+          <div class="gate-note">terminal CYF &nbsp;//&nbsp; timezone 9</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Admin tab: it contains nothing but the login gate. There is no console
+       behind it and no account that opens it. -->
+  <section id="admin" role="tabpanel" aria-labelledby="tab-admin">
+    <div class="panel-head">
+      <span>&gt; Admin</span>
+      <span class="count" id="admin-count">locked</span>
+    </div>
+    <div id="admin-body">
+      <div class="admin-gate">
+        <div class="gate-kicker">restricted section</div>
+        <div class="gate-title">Admin Console</div>
+        <div class="gate-sub">This section requires a signed session.</div>
+        <button type="button" class="gate-btn" id="admin-login">Login Query</button>
+        <div class="gate-note">no session found &nbsp;//&nbsp; terminal CYF &nbsp;//&nbsp; timezone 9</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="foot-row">
+    <span>terminal v2.4.1 &nbsp;//&nbsp; observation room</span>
+    <span>node S-07 &nbsp;//&nbsp; archive mirror: 1 realm behind</span>
+    <span>internal feeds: withdrawn from console</span>
+    <span class="sound" id="sound-toggle" title="toggle audio">sound: off</span>
+  </div>
+  <div class="foot-warn">records on this terminal are provisional. authorised readers are logged. trusted readers are not.</div>
+</footer>
+
+<!-- ===================== CRT / PHOSPHOR EFFECT LAYERS =====================
+     All of these are static or transform-only on purpose: no runtime filters,
+     no blend modes, no per-frame full-screen repaints. -->
+<div class="fx fx-dirt"     aria-hidden="true"></div>
+<div class="fx fx-roll"     aria-hidden="true"></div>
+<div class="fx fx-scan"     aria-hidden="true"></div>
+<div class="fx fx-grille"   aria-hidden="true"></div>
+<div class="fx fx-grain"    aria-hidden="true"></div>
+<div class="fx fx-tear"     aria-hidden="true"></div>
+<div class="fx fx-sweep"    aria-hidden="true"></div>
+<div class="fx fx-vignette" aria-hidden="true"></div>
+<div class="fx fx-flick"    aria-hidden="true"></div>
+
+<!-- No SVG filters and no canvas: a static feTurbulence filter or a live
+     noise field both force the whole page to repaint every frame, which is
+     exactly what made this terminal unusable. Texture is painted by the
+     .fx-* layers above instead. -->
+
+<!-- ===================== DECORATIVE LOGIN PANEL =====================
+     Decoration only. It authenticates nothing, stores nothing and sends
+     nothing: any input at all resolves to the same link error. -->
+<div class="login-overlay" id="login-overlay" role="dialog" aria-modal="true" aria-labelledby="login-title">
+  <div class="login-panel">
+    <div class="login-head">
+      <span id="login-title">Terminal Access</span>
+      <button type="button" class="login-close" id="login-close" aria-label="close">x</button>
+    </div>
+    <div class="login-body">
+      <label class="login-field">
+        <span class="lf-label">Account Name</span>
+        <input type="text" id="login-account" autocomplete="off" spellcheck="false" placeholder="account">
+      </label>
+      <label class="login-field">
+        <span class="lf-label">Terminal Number</span>
+        <input type="text" id="login-terminal" autocomplete="off" spellcheck="false" placeholder="CYF-000000">
+      </label>
+      <label class="login-field">
+        <span class="lf-label">Passphrase</span>
+        <input type="text" id="login-phrase" autocomplete="off" spellcheck="false" placeholder="passphrase">
+      </label>
+      <label class="login-field">
+        <span class="lf-label">Account Password</span>
+        <input type="text" id="login-password" autocomplete="off" spellcheck="false" placeholder="password">
+      </label>
+
+      <div class="login-actions">
+        <button type="button" class="login-submit" id="login-submit">CONFIRM</button>
+        <span class="login-note">clearance 4 required</span>
+      </div>
+
+      <div class="login-msg" id="login-msg" role="status"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* =====================================================================
+     DATA  -  world-space monitoring terminal
+     The division watches OTHER worlds through fixed cameras. Nothing here
+     is about the inside of this building: the only internal traces are the
+     administrator's own actions on the record.
+     ===================================================================== */
+
+  // Channels. The administrative entry expands into the six administrator
+  // accounts (1..6). Every account carries two editable switches: presence
+  // (online / offline) and mute (muted / not muted). Account 1 is "Priest";
+  // the other five follow the same naming style.
+  var ADMIN_ACCOUNTS = [
+    { name: "Priest",  presence: "online",  mute: "muted" },
+    { name: "Sexton",  presence: "online",  mute: "not muted" },
+    { name: "Cantor",  presence: "online",  mute: "muted" },
+    { name: "Warden",  presence: "offline", mute: "not muted" },
+    { name: "Scribe",  presence: "online",  mute: "muted" },
+    { name: "Verger",  presence: "online",  mute: "not muted" }
+  ];
+
+  // The "World NN" entries were cut from the list on request; the feeds that
+  // observe worlds are kept, so the division is still watching something.
+  // The first entry is this console itself, designated CYF.
+  var CHANNELS = [
+    { id: "CYF", title: "Terminal",  nick: "_Antonstar", state: "online" },
+    { title: "Main Feed",         nick: "HomeGlass",  state: "streaming" },
+    { title: "Audio Array",       nick: "LongEar",    state: "streaming" },
+    { title: "Archive Vault",     nick: "DeepShelf",  state: "streaming" },
+    { title: "Relay Chain",       nick: "FarPost",    state: "streaming" },
+    { title: "Relay 2 / Outer",   nick: "DeadLine",   state: "no signal" },
+    { title: "Uncatalogued Feed", nick: "Nameless",   state: "no signal" },
+    { title: "Feed 13 / Unmapped", nick: "BlankMap",  state: "degraded" }
+  ];
+
+  // Mute switch -> how it reads on the console. Edit the string in the array
+  // above to flip an account; these are only the labels.
+  var MUTE_LABEL = { "muted": "MUTED", "not muted": "NOT MUTED" };
+
+  var STATE_CLASS = {
+    "streaming": "state-active",
+    "online": "state-online",
+    "no signal": "state-off",
+    "degraded": "state-degraded",
+    "sealed": "state-sealed",
+    "dormant": "state-off",
+    "MUTED": "state-muted"
+  };
+
+  // Long-form log, one record per line:  timestamp | tag | message
+  // Deliberately institutional and incomplete. The last line is fixed.
+  var LOG_TEXT = [
+    "2026.01.01 00:00:00 | SYS   | record opened. 13 channels mapped. 5 worlds on watch",
+    "2026.01.01 00:00:12 | SYS   | operator on duty: K. ORLOV - console B - clearance 4",
+    "2026.01.02 03:00:00 | SYS   | first sweep complete. no anomalies in any world",
+    "2026.01.05 11:20:41 | CAM 02 | world 01: ash plain. wind only. ruins unchanged",
+    "2026.01.08 19:44:02 | CAM 03 | world 02: compact city. lights on. no movement",
+    "2026.01.11 06:12:30 | AUDIO | all worlds: floor tone 41 Hz. no equipment at that band",
+    "2026.01.14 22:07:15 | SYS   | relay chain outer: handshake ok. origin unresolved",
+    "2026.01.17 03:00:00 | SYS   | world census: 5. no world has answered a hail",
+    "2026.01.19 18:30:02 | NET   | relay chain lost 1 of 4 nodes. 11 s of feed unaccounted",
+    "2026.01.23 04:44:19 | AUDIO | spike +38 dB across three worlds at once",
+    "2026.01.26 09:00:00 | SYS   | operator key 2 rejected: no longer current",
+    "2026.01.29 00:00:00 | SYS   | world 06 added to the chart. it returned our sweep early",
+    "2026.02.02 13:20:08 | CAM 02 | world 01: two new structures standing since 01.29",
+    "2026.02.05 23:11:00 | CAM 03 | world 02: windows lit. earlier count was 0",
+    "2026.02.09 04:00:00 | AUDIO | same 41 Hz. now present in every world simultaneously",
+    "2026.02.12 00:00:00 | SYS   | comparator run: local record vs vault: 1 line differs",
+    "2026.02.14 21:30:44 | NET   | relay 2 answered 2 seconds before the question",
+    "2026.02.17 03:00:00 | CAM 04 | world 03: coastline moved 1 km inland. no water seen",
+    "2026.02.20 08:00:00 | SYS   | census: 6. the chart does not show which world was added",
+    "2026.02.23 01:00:00 | SYS   | console B login at 01:00 by key 2. no operator on duty",
+    "2026.02.26 00:00:00 | SYS   | census: 6, chart: 7. 1 world present on the chart only",
+    "2026.03.01 22:00:00 | CAM 05 | world 04: salt basin dry. registry lists water at 40 m",
+    "2026.03.04 05:44:00 | SYS   | daylight shift applied to all worlds. offset +01:00",
+    "2026.03.07 00:00:00 | SYS   | the chart has grown 4 times since 01.01. no human did it",
+    "2026.03.09 01:00:00 | SYS   | maintenance window opened. no staff assigned",
+    "2026.03.12 03:00:00 | CAM 03 | world 02: same frame returned for 72 hours",
+    "2026.03.15 17:12:44 | SYS   | 1 frame present in the record that was never recorded",
+    "2026.03.18 23:47:12 | NET   | relay 2 handed back footage from a world we do not chart",
+    "2026.03.21 09:00:00 | SYS   | 2.5% of frames in world 02 do not match the source",
+    "2026.03.24 00:00:00 | SYS   | vault key used. operator on duty did not open it",
+    "2026.03.27 06:30:00 | CAM 05 | world 04: a bed of water 400 m across. appeared overnight",
+    "2026.03.30 20:00:00 | AUDIO | a second voice under the 41 Hz. language not on file",
+    "2026.04.02 03:00:00 | SYS   | watch note: do not log the interval between 03.07 and 03.21",
+    "2026.04.05 18:02:46 | CAM 06 | world 05: inverted city. the sky is below the floor",
+    "2026.04.08 04:44:19 | AUDIO | spike +38 dB. now measured inside the observation room",
+    "2026.04.11 00:00:00 | SYS   | console B closed a session that was never opened",
+    "2026.04.14 12:00:00 | CAM 02 | world 01: structures now in a ring. they face inward",
+    "2026.04.17 02:00:00 | SYS   | a feed we never installed is reporting. channel shows no name",
+    "2026.04.20 23:59:00 | STORE | archive vault write count 13. the division has 12 cameras",
+    "2026.04.23 04:00:00 | SYS   | one world reached the record end and started again",
+    "2026.04.26 00:00:00 | SYS   | record revision 39 written by an unnamed operator",
+    "2026.04.29 03:00:00 | NET   | reply arrived from a relay that was removed on 02.07",
+    "2026.05.02 21:09:33 | STORE | segment 1180 repaired - 3 bad blocks remapped",
+    "2026.05.05 00:00:00 | SYS   | chart now 11 entries. entry 7 has no surface, no sky, no floor",
+    "2026.05.08 14:00:00 | CAM 06 | world 05: the inverted city has doubled. no builders seen",
+    "2026.05.11 23:56:40 | CAM 04 | world 03: a second coastline. the first is gone",
+    "2026.05.13 00:00:00 | SYS   | the record was reordered tonight. no session was open",
+    "2026.05.16 05:30:00 | AUDIO | voice count in the array: 2, then 3, then none",
+    "2026.05.19 14:22:11 | NET   | relay chain rerouted itself. the new path is not on the map",
+    "2026.05.22 00:00:00 | SYS   | operator K. ORLOV failed to report at end of shift",
+    "2026.05.25 19:00:00 | SYS   | looking at the array briefly returns world 04, whatever we select",
+    "2026.05.28 23:00:00 | CAM 05 | world 04: the basin floor is now under 2 m of water",
+    "2026.05.31 23:59:59 | SYS   | month sealed. unlogged items are not recoverable",
+    "2026.06.02 03:00:00 | SYS   | shift handover skipped. the roster still lists one name",
+    "2026.06.05 20:00:00 | CAM 01 | main feed steady. 1 frame every pass has no image",
+    "2026.06.08 11:00:00 | SYS   | chart entry 3 moved. no write was logged",
+    "2026.06.11 02:00:00 | SYS   | two worlds now return identical images, offset by 1 day",
+    "2026.06.14 20:00:00 | STORE | vault door open 4 minutes. the record shows 0",
+    "2026.06.17 00:00:00 | SYS   | audio array records no breath in the observation room",
+    "2026.06.20 02:11:07 | NET   | packet loss 0.02% - link stable - origin still unresolved",
+    "2026.06.23 00:00:00 | SYS   | chart count 15. last verification pass was 7 days ago",
+    "2026.06.26 03:00:00 | AUDIO | the 41 Hz tone stopped for 6 hours. every world changed",
+    "2026.06.29 21:00:00 | SYS   | vault sync deferred. reason field left empty",
+    "2026.07.01 00:03:15 | SYS   | mid-year retention pass - six months placed under seal",
+    "2026.07.03 03:26:49 | CAM 02 | world 01: the ring is complete. it now has a centre",
+    "2026.07.06 22:00:00 | SYS   | baseline recalculated. 1 world removed from the count",
+    "2026.07.09 01:00:00 | SYS   | console B login by key 2. key 2 was retired in january",
+    "2026.07.12 23:58:20 | AUDIO | wind noise. the array has no microphone pointed at weather",
+    "2026.07.15 04:00:00 | CAM 05 | world 04: something crosses the water at the same hour daily",
+    "2026.07.17 00:00:00 | SYS   | a world answered the sweep by name. the name is not on file",
+    "2026.07.20 03:00:00 | SYS   | watch note: the array must not be queried for world 04 after 23:00",
+    "2026.07.23 03:00:00 | SYS   | records for 07.18 to 07.22 were never written",
+    "2026.07.26 00:00:00 | SYS   | vault copy and local copy differ again. difference is 1 world",
+    "2026.07.29 22:00:00 | CAM 02 | world 01: the centre is lit. no movement. no heat",
+    "2026.07.31 23:59:59 | SYS   | record revision 41 written. writer field empty",
+    "2026.08.01 23:59:58 | SYS   | monitor output switched to green phosphor mode",
+    "2026.08.04 02:44:10 | CAM 07 | array recording interrupted - power blip - resumed",
+    "2026.08.05 02:44:10 | SYS   | system clock restored from backup source",
+    "2026.08.08 03:00:00 | SYS   | watch note: reader must not be told how many worlds there are",
+    "2026.08.11 23:00:00 | SYS   | operator K. ORLOV absent from roster. roster unchanged",
+    "2026.08.14 04:00:00 | CAM 03 | world 02: one street now ends at a wall that is not mapped",
+    "2026.08.17 00:00:00 | SYS   | duration of each pass is 1 second shorter after each sweep",
+    "2026.08.19 21:00:00 | NET   | relay 2 returned 3 minutes of footage from tomorrow",
+    "2026.08.21 09:00:00 | STORE | checksum across the vault failed silently. archive marked suspect",
+    "2026.08.23 03:00:00 | SYS   | the chart is being drawn from the wrong end",
+    "2026.08.26 03:00:00 | CAM 06 | world 05: the city is upright. earlier frames show it inverted",
+    "2026.08.29 02:00:00 | SYS   | heartbeat between console and array: 40 ms, then 39, then 38",
+    "2026.08.31 23:59:59 | SYS   | month sealed with 14 open items. all unlogged",
+    "2026.09.02 03:19:54 | STORE | storage array failure on shelf 02",
+    "2026.09.02 03:19:55 | CRIT  | recording stopped on channels 01-04, 06",
+    "2026.09.02 03:20:01 | SYS   | fallback to local buffer - capacity 6 h",
+    "2026.09.02 03:20:44 | CRIT  | chart count could not be verified against any copy",
+    "2026.09.03 03:20:00 | ADMIN | administrator session opened from an address not on the map",
+    "2026.09.03 03:41:26 | CAM 04 | world 03: the drowned floor has moved back out to sea",
+    "2026.09.04 03:44:02 | NET   | unknown MAC 6A:0F:19:2C:8E:01 joined the segment",
+    "2026.09.05 21:00:00 | ADMIN | session untouched for 18 h. operator not on duty list",
+    "2026.09.06 00:00:00 | SYS   | sessions opened tonight: 1. operators on roster: 0",
+    "2026.09.07 02:00:00 | SYS   | device 6A:0F:19:2C:8E:01 classified: NONE. still transmitting",
+    "2026.09.08 03:00:00 | SYS   | records opened at 03:00 with no session and no operator",
+    "2026.09.09 04:00:00 | SYS   | render process 2 reads the record 4 lines ahead of writing",
+    "2026.09.10 02:59:47 | ADMIN | administrator session closed",
+    "2026.09.13 03:00:00 | SYS   | last revision was applied 4 days ago. it was not a correction",
+    "2026.09.16 22:00:00 | CAM 05 | world 04: the far shore is visible for the first time",
+    "2026.09.19 01:00:00 | SYS   | the record now contains lines written by a later pass",
+    "2026.09.22 06:30:00 | AUDIO | the 41 Hz tone returned. three worlds are now in phase",
+    "2026.09.25 23:00:00 | SYS   | the chart stopped growing. entries are being merged",
+    "2026.09.28 00:00:00 | STORE | retention limit reached. oldest footage marked",
+    "2026.10.01 00:12:33 | CAM 01 | main feed normal. viewer not classified",
+    "2026.10.02 03:00:00 | SYS   | worlds answering the sweep: 13. worlds on the chart: none",
+    "2026.10.02 23:40:11 | CAM 06 | world 05: only the observation room is shown from now",
+    "2026.10.03 04:12:07 | SYS   | daily archive rotation complete - final sweep",
+    "2026.10.03 04:13:52 | STORE | free space 0.4% - oldest segments purged",
+    "2026.10.03 04:14:30 | SYS   | mirror sync to vault attempted - no confirmation returned",
+    "2026.10.03 04:15:20 | SYS   | every world is now returning the same frame",
+    "2026.10.03 04:15:44 | SYS   | that frame contains this terminal",
+    "2026.10.03 04:16:02 | SYS   | reader identified",
+    "2026.10.03 04:16:03 | SYS   | reader address resolved: external to this world",
+
+    // --- last entry (fixed slot: 2026.10.3 / ADMIN / transmission error) ---
+    ["2026.10.3", "ADMIN", "TRANSMISSION ERROR", "err"]
+  ];
+
+  var SESSION_ID = "OP-2026-1003-A7";
+  var TOTAL_CHANNELS = 13;
+  var OPEN_CHANNELS = 9;
+
+  // "TIMESTAMP | TAG | MESSAGE"  ->  [timestamp, tag, message]
+  var LOGS = LOG_TEXT.map(function (line) {
+    if (Object.prototype.toString.call(line) === "[object Array]") return line;
+    var p = line.split("|");
+    return [p[0].trim(), p[1].trim(), p[2].trim()];
+  });
+
+  /* =====================================================================
+     RENDER: CHANNELS
+     ===================================================================== */
+  var chBody = document.getElementById("channel-list");
+  var chCount = document.getElementById("ch-count");
+
+  function span(cls, text) {
+    var el = document.createElement("span");
+    el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+
+  // ---- the administrative entry: one row per account, 1..6 ----
+  // Two switches per account: presence (online / offline) and mute
+  // (muted / not muted). Edit ADMIN_ACCOUNTS to flip either one.
+  var CH_COUNT = ADMIN_ACCOUNTS.length + CHANNELS.length;
+
+  (function renderAdmins() {
+    var head = document.createElement("div");
+    head.className = "channel admin-head";
+    head.appendChild(span("ch-id", "CH-00"));
+    head.appendChild(span("ch-name", "Administrator"));
+    head.appendChild(span("ch-adm-total", ADMIN_ACCOUNTS.length + " accounts"));
+    chBody.appendChild(head);
+
+    var legend = document.createElement("div");
+    legend.className = "ch-controls";
+    legend.textContent = "CONTROLS  //  ONLINE|OFFLINE   MUTED|NOT MUTED";
+    chBody.appendChild(legend);
+
+    ADMIN_ACCOUNTS.forEach(function (acct, i) {
+      var row = document.createElement("div");
+      row.className = "channel admin-row";
+
+      row.appendChild(span("ch-acc-no", String(i + 1) + "."));
+      row.appendChild(span("ch-acc-name", acct.name));
+
+      var presence = span("ch-presence " + (acct.presence === "online" ? "is-online" : "is-offline"),
+                          acct.presence === "online" ? "ONLINE" : "OFFLINE");
+      row.appendChild(presence);
+
+      var muted = acct.mute === "muted";
+      row.appendChild(span("ch-mute " + (muted ? "is-muted" : "is-unmuted"),
+                           MUTE_LABEL[acct.mute] || String(acct.mute).toUpperCase()));
+
+      chBody.appendChild(row);
+    });
+  })();
+
+  // ---- the monitored feeds ----
+  // An explicit `id` is used verbatim, so the terminal reads CH-CYF; the rest
+  // are numbered in order.
+  CHANNELS.forEach(function (ch, index) {
+    var line = document.createElement("div");
+    line.className = "channel";
+
+    var label = ch.id ? ch.id : String(index < 10 ? "0" : "") + index;
+    line.appendChild(span("ch-id", "CH-" + label));
+    line.appendChild(span("ch-name", ch.title));
+    line.appendChild(span("ch-nick", ch.nick));
+    line.appendChild(span("ch-state " + (STATE_CLASS[ch.state] || "state-active"), ch.state));
+
+    chBody.appendChild(line);
+  });
+
+  chCount.textContent = CH_COUNT + " lines";
+
+  /* =====================================================================
+     RENDER: LOG (streamed line by line)
+     ===================================================================== */
+  var logBody = document.getElementById("log-body");
+  var logCount = document.getElementById("log-count");
+  var mainEl = document.getElementById("main");
+
+  var TAG_CLASS = {
+    "sys": "sys",
+    "net": "net",
+    "store": "store",
+    "audio": "mic",
+    "mic a": "mic",
+    "mic": "mic",
+    "crit": "crit",
+    "admin": "admin",
+    "subject": "subject",
+    "instance": "subject",
+    "world": "cam",
+    "realm": "net"
+  };
+
+  function tagClass(tag) {
+    return TAG_CLASS[String(tag).toLowerCase()] || "cam";
+  }
+
+  function appendRow(entry) {
+    var ts = entry[0], tag = entry[1], msg = entry[2], extra = entry[3];
+    var kind = tagClass(tag);
+
+    var row = document.createElement("div");
+    row.className = "row";
+    if (extra) row.classList.add(extra);
+    if (kind === "crit") row.classList.add("crit");
+    if (kind === "admin") row.classList.add("admin");
+
+    var c1 = document.createElement("span");
+    c1.className = "ts";
+    c1.textContent = ts;
+
+    var c2 = document.createElement("span");
+    c2.className = "tag " + kind;
+    c2.textContent = tag;
+
+    var c3 = document.createElement("span");
+    c3.className = "msg";
+    if (kind === "subject") c3.classList.add("kind-subject");
+    c3.textContent = msg;
+
+    row.appendChild(c1);
+    row.appendChild(c2);
+    row.appendChild(c3);
+    logBody.appendChild(row);
+    logBody.scrollTop = logBody.scrollHeight;
+    return row;
+  }
+
+  var flushAll = false;
+
+  /* Streamed with a time-based interval in batches of 8, then the last five
+     records are held back and released one at a time. The old build fired one
+     setTimeout per line and forced a reflow after every single one; this lands
+     the whole record in about a second while staying smooth. */
+  (function stream() {
+    var i = 0;
+    var LEN = LOGS.length;
+    var TAIL = 5;
+    var FLUSH_AT = LEN - TAIL;
+
+    function emit(count) {
+      var end = Math.min(i + count, LEN);
+      while (i < end) {
+        var row = appendRow(LOGS[i]);
+        if (i === LEN - 1) {
+          var cur = document.createElement("span");
+          cur.className = "cursor";
+          row.appendChild(cur);
+        }
+        i++;
+      }
+      logCount.textContent = "records: " + i + "/" + LEN;
+      if (i < LEN && i >= FLUSH_AT) {
+        setTimeout(function () { emit(1); }, 260);
+      }
+    }
+
+    var timer = setInterval(function () {
+      if (flushAll) { clearInterval(timer); return; }
+      if (i >= FLUSH_AT) { clearInterval(timer); return; }
+      emit(8);
+    }, 40);
+
+    // release the held-back tail, one record at a time, once the bulk landed
+    setTimeout(function () {
+      if (flushAll) return;
+      clearInterval(timer);
+      emit(1);
+    }, 40 * Math.ceil(FLUSH_AT / 8) + 120);
+  })();
+
+  // Impatient readers can dump the whole record at once. Watchkeeper's
+  // prerogative; the terminal notes who did it.
+  (function allowSkip() {
+    var done = false;
+
+    function dump() {
+      if (done) return;
+      done = true;
+      flushAll = true;                 // makes every pending streamed line a no-op
+      logBody.innerHTML = "";
+      LOGS.forEach(function (entry, i) {
+        var row = appendRow(entry);
+        if (i === LOGS.length - 1) {
+          var cur = document.createElement("span");
+          cur.className = "cursor";
+          row.appendChild(cur);
+        }
+      });
+      var note = document.createElement("div");
+      note.className = "row";
+      note.innerHTML = '<span class="ts">' + new Date().getFullYear() +
+        '.' + pad(new Date().getMonth() + 1) + '.' + pad(new Date().getDate()) +
+        ' ' + pad(new Date().getHours()) + ':' + pad(new Date().getMinutes()) +
+        ':' + pad(new Date().getSeconds()) +
+        '</span><span class="tag sys">SYS</span>' +
+        '<span class="msg">record dumped by reader. reader now holds the whole file</span>';
+      logBody.appendChild(note);
+      logBody.scrollTop = logBody.scrollHeight;
+      logCount.textContent = "records: " + LOGS.length + "/" + LOGS.length;
+    }
+
+    logBody.addEventListener("click", dump);
+  })();
+
+  /* =====================================================================
+     BOOT SEQUENCE
+     ===================================================================== */
+  var bootEl = document.getElementById("boot");
+  var bootLines = [
+    "bios check ......................... ok",
+    "mapping world-space chart .......... 5 worlds",
+    "relay chain ....................... 3 of 4 nodes",
+    "archive mirror ..................... 1 world behind",
+    "operator clearance ................. verified",
+    "opening record ..................... 2026.01.01"
+  ];
+
+  var b = 0;
+  function typeBoot() {
+    if (b >= bootLines.length) {
+      mainEl.classList.add("ready");
+      // collapse the boot block so it stops reserving space
+      bootEl.classList.add("done");
+      setTimeout(function () { bootEl.textContent = ""; }, 500);
+      return;
+    }
+    var line = document.createElement("div");
+    bootEl.appendChild(line);
+    var text = bootLines[b];
+    var p = 0;
+    (function step() {
+      if (p <= text.length) {
+        var head = text.slice(0, p);
+        var tail = text.slice(p);
+        line.innerHTML = "";
+        line.appendChild(document.createTextNode(head));
+        var on = document.createElement("span");
+        on.className = "on";
+        on.textContent = tail;
+        line.appendChild(on);
+        p += 2;
+        setTimeout(step, 9);
+      } else {
+        line.textContent = text;
+        b += 1;
+        setTimeout(typeBoot, 60);
+      }
+    })();
+  }
+  setTimeout(typeBoot, 180);
+
+  /* =====================================================================
+     HEADER: operation id, sector counter, clock
+     ===================================================================== */
+  document.getElementById("session-id").textContent = SESSION_ID;
+  document.getElementById("feed-count").textContent = OPEN_CHANNELS + "/" + TOTAL_CHANNELS;  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  var clockDate = document.getElementById("clock-date");
+  var clockTime = document.getElementById("clock-time");
+  function tick() {
+    var d = new Date();
+    clockDate.textContent = d.getFullYear() + "." + pad(d.getMonth() + 1) + "." + pad(d.getDate());
+    clockTime.textContent = pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  }
+  tick();
+  // once a second would repaint the header forever for no reason
+  setInterval(tick, 5000);
+
+  /* =====================================================================
+     NOTE ON EFFECTS
+     The previous build animated a full-screen canvas noise field and ran an
+     SVG feDisplacementMap over the whole page. Both forced a full repaint of
+     every glyph on every frame, which is what made this terminal crawl.
+     The phosphor texture is now painted once, statically, by .fx-grain and
+     .fx-dirt; nothing in this file re-renders during scrolling or streaming.
+     ===================================================================== */
+
+  /* =====================================================================
+     OPTIONAL SOUND: low CRT hum + click, enabled by user gesture
+     ===================================================================== */
+  var soundBtn = document.getElementById("sound-toggle");
+  var audio = null, hum = null, soundOn = false;
+
+  function buildAudio() {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return false;
+    var ctx = new Ctx();
+
+    var osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.value = 60;
+
+    var gain = ctx.createGain();
+    gain.gain.value = 0;
+
+    var filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 220;
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+
+    audio = ctx;
+    hum = gain;
+    return true;
+  }
+
+  soundBtn.addEventListener("click", function () {
+    if (!audio && !buildAudio()) {
+      soundBtn.textContent = "sound: unavailable";
+      return;
+    }
+    if (audio.state === "suspended") audio.resume();
+    soundOn = !soundOn;
+    hum.gain.setTargetAtTime(soundOn ? 0.02 : 0, audio.currentTime, 0.08);
+    soundBtn.textContent = "sound: " + (soundOn ? "on" : "off");
+  });
+
+  /* =====================================================================
+     DECORATIVE LOGIN PANEL
+     There is no authentication here and nothing is transmitted. Whatever is
+     typed, CONFIRM resolves to the same link error - the fields exist to be
+     filled in, not to be checked.
+     ===================================================================== */
+  (function loginPanel() {
+    var overlay = document.getElementById("login-overlay");
+    var openBtn = document.getElementById("login-open");
+    var closeBtn = document.getElementById("login-close");
+    var submit = document.getElementById("login-submit");
+    var msg = document.getElementById("login-msg");
+    var fields = [
+      document.getElementById("login-account"),
+      document.getElementById("login-terminal"),
+      document.getElementById("login-phrase"),
+      document.getElementById("login-password")
+    ];
+    if (!overlay || !openBtn) return;
+
+    var LAST_FOCUS = null;
+
+    function clearMsg() {
+      msg.textContent = "";
+      msg.classList.remove("show");
+    }
+
+    function open() {
+      LAST_FOCUS = document.activeElement;
+      overlay.classList.add("open");
+      clearMsg();
+      fields[0].focus();
+    }
+
+    function close() {
+      overlay.classList.remove("open");
+      if (LAST_FOCUS && LAST_FOCUS.focus) LAST_FOCUS.focus();
+    }
+
+    function confirm() {
+      // every submission fails the same way, by design
+      var line = "";
+      fields.forEach(function (f) { line += (f.value || "").length; });
+      msg.textContent = "LINK ERROR  //  no route to authorisation service\n" +
+                        "submitted fields: " + fields.length + "   payload: " + line + " bytes\n" +
+                        "terminal CYF    timezone 9    attempt not recorded";
+      msg.classList.add("show");
+      fields.forEach(function (f) { f.value = ""; });
+      fields[0].focus();
+    }
+
+    openBtn.addEventListener("click", open);
+    closeBtn.addEventListener("click", close);
+    submit.addEventListener("click", confirm);
+
+    // the Admin tab's gate opens the same query, and labels the trigger
+    var gateBtn = document.getElementById("admin-login");
+    if (gateBtn) {
+      gateBtn.addEventListener("click", function () {
+        openBtn.textContent = "ADMIN QUERY";
+        open();
+      });
+    }
+
+    // the locked channel zone opens the same query too
+    var lockedBtn = document.getElementById("locked-login");
+    if (lockedBtn) {
+      lockedBtn.addEventListener("click", function () {
+        openBtn.textContent = "CHANNEL QUERY";
+        open();
+      });
+    }
+
+    // click the dark area (but not the panel) to dismiss
+    overlay.addEventListener("mousedown", function (e) {
+      if (e.target === overlay) close();
+    });
+
+    // Enter confirms from any field, Escape closes
+    fields.forEach(function (f) {
+      f.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); confirm(); }
+        if (e.key === "Escape") { e.preventDefault(); close(); }
+      });
+    });
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && overlay.classList.contains("open")) close();
+    });
+  })();
+
+  /* =====================================================================
+     TABS
+     One panel at a time. Logs is the only section with content: the Channels
+     tab re-shows the channel list, and the Admin tab holds nothing but the
+     login gate.
+     ===================================================================== */
+  (function tabs() {
+    var PANELS = {
+      logs: document.getElementById("logs"),
+      channels: document.getElementById("channels"),
+      admin: document.getElementById("admin")
+    };
+    var TAB_IDS = ["logs", "channels", "admin"];
+    var buttons = {};
+
+    TAB_IDS.forEach(function (name) {
+      buttons[name] = document.getElementById("tab-" + name);
+    });
+    if (!buttons.logs || !PANELS.logs) return;
+
+    function show(name) {
+      TAB_IDS.forEach(function (other) {
+        var panel = PANELS[other];
+        var btn = buttons[other];
+        var on = other === name;
+        if (panel) panel.classList.toggle("is-active", on);
+        if (btn) {
+          btn.classList.toggle("is-active", on);
+          btn.setAttribute("aria-selected", on ? "true" : "false");
+        }
+      });
+      document.getElementById("login-open").textContent = "LOGIN";
+    }
+
+    TAB_IDS.forEach(function (name) {
+      if (buttons[name]) {
+        buttons[name].addEventListener("click", function () { show(name); });
+      }
+    });
+  })();
+})();
+</script>
+</body>
+</html>
